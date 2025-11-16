@@ -44,7 +44,7 @@
 <body>
   <div class="stage" role="application" aria-label="Interactive candle video">
     <video id="scene" playsinline preload="auto" crossorigin="anonymous">
-      <!-- Replace scene.mp4 with your exported video. Use MP4 (h264) for broad support. -->
+      <!-- Make sure your file is named scene.mp4 and is in the same repo/folder -->
       <source src="scene.mp4" type="video/mp4">
       Your browser doesn't support HTML5 video.
     </video>
@@ -52,7 +52,6 @@
     <div class="overlay" id="overlay">
       <div class="prompt" id="prompt">Blow it out!</div>
 
-      <!-- Cake/candle click area positioned to match cake in video. Adjust bottom/width in CSS if flame misaligns -->
       <div class="cake-area" id="cakeArea" aria-hidden="false" title="Click or blow to extinguish">
         <div class="candle-wrap" id="candleWrap">
           <div class="flame" id="flame" aria-hidden="false"></div>
@@ -61,7 +60,6 @@
       </div>
 
       <div class="smoke" id="smoke" aria-hidden="true"></div>
-
       <canvas id="confetti"></canvas>
     </div>
 
@@ -76,10 +74,11 @@
   /*********************
    * Configuration
    *********************/
-  const START_PROMPT_AT = 3.5; // seconds: when cake is shown & prompt should appear (tweak for your video)
-  const END_PROMPT_AT = 8;   // seconds: when prompt disappears (optional)
-  const BLOW_THRESHOLD = 0.12; // audio RMS threshold to detect a blow (tweak if too sensitive)
-  const BLOW_WINDOW_MS = 700; // how long RMS must exceed threshold to count as blow
+  const START_PROMPT_AT = 4.5; // <-- show prompt and pause here
+  const END_PROMPT_AT = 999;   // not used now because we pause the video
+  const BLOW_THRESHOLD = 0.12; // mic RMS threshold
+  const BLOW_WINDOW_MS = 700;  // how long RMS must sustain
+  const STOP_BEFORE_END = 1.0; // stop playback this many seconds before video end
 
   /*********************
    * DOM
@@ -93,7 +92,12 @@
   const confettiCanvas = document.getElementById('confetti');
   const smokeEl = document.getElementById('smoke');
 
-  let micStream = null, analyser=null, audioCtx=null, dataArray=null, blowTimer=null, blowDetected=false;
+  /*********************
+   * State
+   *********************/
+  let micStream = null, analyser=null, audioCtx=null, dataArray=null;
+  let blowTimer = null, blowDetected=false, promptShown=false;
+  let stopAt = null; // video.duration - STOP_BEFORE_END
 
   /*********************
    * Play/Pause
@@ -102,18 +106,32 @@
     if (video.paused) { video.play(); playPause.textContent='Pause' } 
     else { video.pause(); playPause.textContent='Play' }
   });
-
   video.addEventListener('ended', ()=> playPause.textContent='Play');
 
   /*********************
-   * Time update: show prompt & enable interactions
+   * Time update: pause at START_PROMPT_AT (exact) and show prompt
    *********************/
   video.addEventListener('timeupdate', ()=>{
     const t = video.currentTime;
-    if (t >= START_PROMPT_AT && t <= END_PROMPT_AT && !blowDetected) {
+
+    // Once we reach the start cue, pause the video and show prompt (only once)
+    if (!promptShown && t >= START_PROMPT_AT) {
+      promptShown = true;
+      // compute stopAt if possible
+      if (video.duration && !isNaN(video.duration)) {
+        stopAt = Math.max(0, video.duration - STOP_BEFORE_END);
+      }
+      // pause to hold frame for user interaction
+      video.pause();
+      playPause.textContent='Play';
       showPrompt();
-    } else {
-      hidePrompt();
+      return;
+    }
+
+    // After blow detected and playback resumed, auto-pause near end
+    if (blowDetected && stopAt !== null && video.currentTime >= stopAt) {
+      video.pause();
+      playPause.textContent='Play';
     }
   });
 
@@ -124,23 +142,18 @@
   }
   function hidePrompt(){
     prompt.style.display='none';
-    // do not hide flame here (we only hide flame on blow)
   }
 
   /*********************
    * Click / Tap to blow
    *********************/
-  cakeArea.addEventListener('click', attemptBlow);
-
-  function attemptBlow(){
-    // only accept input during prompt window
-    const t = video.currentTime;
-    if (t < START_PROMPT_AT - 0.5 || t > END_PROMPT_AT + 1) return;
+  cakeArea.addEventListener('click', ()=> {
+    if (!promptShown || blowDetected) return;
     extinguishCandle('click');
-  }
+  });
 
   /*********************
-   * Microphone Blow Detection (simple RMS-based)
+   * Mic detection
    *********************/
   enableMicBtn.addEventListener('click', async ()=>{
     if (micStream) { stopMic(); enableMicBtn.textContent='Enable Mic (optional)'; return; }
@@ -166,32 +179,38 @@
       micStream=null;
     }
     if (audioCtx) { audioCtx.close(); audioCtx=null; }
-    analyser=null; dataArray=null;
+    analyser=null; dataArray=null; blowTimer=null;
   }
 
   function runAudioLoop(){
     if (!analyser) return;
     analyser.getByteTimeDomainData(dataArray);
-    // compute normalized RMS
     let sum=0;
     for (let i=0;i<dataArray.length;i++){
       const val = (dataArray[i] - 128)/128;
       sum += val*val;
     }
     const rms = Math.sqrt(sum / dataArray.length);
-    // console.log('RMS', rms);
-    // require sustained loudness for BLOW_WINDOW_MS
+
+    // Only consider mic blows when prompt is shown and not already blown
+    if (!promptShown || blowDetected) {
+      if (analyser) requestAnimationFrame(runAudioLoop);
+      return;
+    }
+
     if (rms >= BLOW_THRESHOLD) {
       if (!blowTimer) blowTimer = Date.now();
       else if (Date.now() - blowTimer >= BLOW_WINDOW_MS) {
-        // only blow if in prompt window
+        // final guard: ensure currentTime still around prompt time
         const t = video.currentTime;
-        if (t >= START_PROMPT_AT && t <= END_PROMPT_AT && !blowDetected) extinguishCandle('mic');
+        if (t >= START_PROMPT_AT - 0.5 && t <= (stopAt || START_PROMPT_AT + 5)) {
+          extinguishCandle('mic');
+        }
       }
     } else {
       blowTimer = null;
     }
-    requestAnimationFrame(runAudioLoop);
+    if (analyser) requestAnimationFrame(runAudioLoop);
   }
 
   /*********************
@@ -200,23 +219,36 @@
   function extinguishCandle(source='user'){
     if (blowDetected) return;
     blowDetected = true;
-    // remove flame
+    // stop mic to avoid double fire
+    stopMic();
+    enableMicBtn.textContent='Enable Mic (optional)';
+
+    // visual
     flame.style.transition='opacity .4s, transform .6s';
     flame.style.opacity = 0;
     flame.style.transform = 'translateY(-6px) scale(.6)';
-    // smoke animation (simple)
     showSmoke();
-    // confetti + applause
     launchConfetti();
     playApplause();
-    // small visual feedback
+
     prompt.textContent = 'You did it!';
-    setTimeout(()=>prompt.style.display='none', 1800);
+    setTimeout(()=>hidePrompt(), 1400);
+    cakeArea.style.pointerEvents='none';
+
+    // compute stopAt if not already
+    if (!stopAt && video.duration && !isNaN(video.duration)) {
+      stopAt = Math.max(0, video.duration - STOP_BEFORE_END);
+    }
+
+    // resume playback (unless we're already at or beyond stopAt)
+    setTimeout(()=> {
+      if (stopAt !== null && video.currentTime >= stopAt) return;
+      video.play().catch(()=>{});
+    }, 250);
   }
 
   function showSmoke(){
     smokeEl.style.opacity = 1;
-    smokeEl.innerHTML = ''; // we can draw a simple CSS smoke svg
     smokeEl.innerHTML = `
       <svg width="120" height="60" viewbox="0 0 120 60" xmlns="http://www.w3.org/2000/svg">
         <g opacity="0.9" fill="none" stroke="#999" stroke-width="2" stroke-linecap="round">
@@ -225,17 +257,15 @@
           <path d="M74 42 q12 -12 20 -4" stroke-opacity="0.3"/>
         </g>
       </svg>`;
-    // fade out after a bit
     setTimeout(()=>{ smokeEl.style.transition='opacity 1.2s'; smokeEl.style.opacity=0 }, 900);
   }
 
   /*********************
-   * Confetti (simple particles)
+   * Confetti + sound (same simple implementations)
    *********************/
   function launchConfetti(){
     const canvas = confettiCanvas;
     const ctx = canvas.getContext('2d');
-    // resize canvas
     canvas.width = canvas.clientWidth;
     canvas.height = canvas.clientHeight;
     const W = canvas.width, H = canvas.height;
@@ -257,53 +287,36 @@
       ctx.clearRect(0,0,W,H);
       ticks++;
       for (let p of pieces){
-        p.x += p.vx;
-        p.y += p.vy;
-        p.vy += 0.06; // gravity
-        p.rot += p.rotSpeed;
-        ctx.save();
-        ctx.translate(p.x,p.y);
-        ctx.rotate(p.rot*Math.PI/180);
-        ctx.fillStyle = p.color;
-        ctx.fillRect(-p.size/2, -p.size/2, p.size, p.size*0.6);
-        ctx.restore();
+        p.x += p.vx; p.y += p.vy; p.vy += 0.06; p.rot += p.rotSpeed;
+        ctx.save(); ctx.translate(p.x,p.y); ctx.rotate(p.rot*Math.PI/180);
+        ctx.fillStyle = p.color; ctx.fillRect(-p.size/2, -p.size/2, p.size, p.size*0.6); ctx.restore();
       }
-      if (ticks < 220) requestAnimationFrame(anim);
-      else ctx.clearRect(0,0,W,H);
+      if (ticks < 220) requestAnimationFrame(anim); else ctx.clearRect(0,0,W,H);
     };
     anim();
   }
 
   function playApplause(){
-    const audio = new Audio();
-    // small embedded applause base64 would be heavy; instead use WebAudio simple cheer tone
     const ctx = new (window.AudioContext || window.webkitAudioContext)();
-    const o = ctx.createOscillator();
-    const g = ctx.createGain();
-    o.type = 'triangle';
-    o.frequency.value = 880;
-    g.gain.value = 0.0001;
-    o.connect(g); g.connect(ctx.destination);
-    o.start();
-    g.gain.exponentialRampToValueAtTime(0.08, ctx.currentTime + 0.02);
+    const o = ctx.createOscillator(); const g = ctx.createGain();
+    o.type = 'triangle'; o.frequency.value = 880; g.gain.value = 0.0001; o.connect(g); g.connect(ctx.destination);
+    o.start(); g.gain.exponentialRampToValueAtTime(0.08, ctx.currentTime + 0.02);
     o.frequency.exponentialRampToValueAtTime(660, ctx.currentTime + 0.25);
     g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.8);
     setTimeout(()=>{ o.stop(); ctx.close(); }, 1000);
   }
 
   /*********************
-   * Accessibility: keyboard to blow
+   * Keyboard accessibility
    *********************/
   window.addEventListener('keydown', (e)=>{
-    if (e.key === 'Enter' || e.key === ' ') attemptBlow();
+    if ((e.key === 'Enter' || e.key === ' ') && promptShown && !blowDetected) extinguishCandle('key');
   });
 
   /*********************
-   * Tweak: pause at prompt (optional)
+   * Cleanup
    *********************/
-  // If you want the video to pause automatically when prompt appears:
-  // video.addEventListener('timeupdate', ()=>{ if (video.currentTime >= START_PROMPT_AT && video.currentTime < START_PROMPT_AT+0.5) video.pause(); });
-
+  window.addEventListener('beforeunload', ()=> { stopMic(); });
   </script>
 </body>
 </html>
