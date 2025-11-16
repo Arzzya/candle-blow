@@ -205,6 +205,7 @@ function extinguishCandle(source='user'){
     // swap to second video
     mainVideo.pause();
     mainVideo.src = SECOND_VIDEO;
+    stopAt = null;
     mainVideo.load();
     mainVideo.play().catch(err => { console.warn('Autoplay blocked', err); playPause.textContent='Play'; });
 
