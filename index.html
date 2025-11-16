@@ -1,0 +1,309 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Blow Out the Candle — Interactive</title>
+  <style>
+    :root{--bg:#f7f2f6;--accent:#ff6b9a}
+    html,body{height:100%;margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,"Helvetica Neue",Arial;background:var(--bg);display:flex;align-items:center;justify-content:center}
+    .stage{width:min(900px,96vw);max-width:1200px;background:white;border-radius:12px;box-shadow:0 10px 30px rgba(0,0,0,.12);overflow:hidden;position:relative}
+    video{display:block;width:100%;height:auto;background:black}
+    .overlay{position:absolute;left:0;right:0;top:0;bottom:0;pointer-events:none}
+    /* Cake/candle UI */
+    .cake-area{position:absolute;pointer-events:auto;cursor:pointer;display:flex;align-items:center;justify-content:center;left:50%;transform:translateX(-50%);
+      width:36%;height:28%;bottom:18%;} /* tweak to align with cake in your video */
+    .candle-wrap{position:relative;display:flex;flex-direction:column;align-items:center;gap:6px}
+    .flame{
+      width:12px;height:18px;border-radius:10px 10px 6px 6px;background:linear-gradient(#ffd966,#ff8a00);
+      box-shadow:0 0 10px rgba(255,140,0,.8);transform-origin:center bottom;animation:flicker 250ms infinite;
+      transition:opacity .25s,transform .25s;
+    }
+    @keyframes flicker{
+      0%{transform:translateY(0) scaleY(1)}
+      50%{transform:translateY(-1px) scaleY(.96)}
+      100%{transform:translateY(0) scaleY(1)}
+    }
+    .candle-stick{width:4px;height:32px;background:#fff;border-radius:2px;box-shadow:inset 0 -3px 0 rgba(0,0,0,.06)}
+    .prompt{
+      position:absolute;top:6%;left:50%;transform:translateX(-50%);background:rgba(255,255,255,.92);padding:8px 14px;border-radius:999px;font-weight:600;color:#333;display:none;pointer-events:none;box-shadow:0 6px 18px rgba(0,0,0,.12)
+    }
+    .smoke{position:absolute;left:50%;transform:translateX(-50%);bottom:40%;opacity:0;pointer-events:none}
+    canvas#confetti{position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none}
+    .controls{padding:12px 16px;background:linear-gradient(180deg,transparent,#fff);display:flex;gap:10px;align-items:center;position:relative;z-index:4}
+    button.primary{background:var(--accent);border:none;color:white;padding:8px 12px;border-radius:8px;font-weight:700;cursor:pointer}
+    button.secondary{background:transparent;border:1px solid rgba(0,0,0,.08);padding:8px 12px;border-radius:8px;cursor:pointer}
+    .muted{opacity:.7;font-size:13px}
+    /* mobile tweaks */
+    @media (max-width:520px){
+      .cake-area{width:56%;height:24%;bottom:18%}
+      .prompt{font-size:14px}
+    }
+  </style>
+</head>
+<body>
+  <div class="stage" role="application" aria-label="Interactive candle video">
+    <video id="scene" playsinline preload="auto" crossorigin="anonymous">
+      <!-- Replace scene.mp4 with your exported video. Use MP4 (h264) for broad support. -->
+      <source src="scene.mp4" type="video/mp4">
+      Your browser doesn't support HTML5 video.
+    </video>
+
+    <div class="overlay" id="overlay">
+      <div class="prompt" id="prompt">Blow it out!</div>
+
+      <!-- Cake/candle click area positioned to match cake in video. Adjust bottom/width in CSS if flame misaligns -->
+      <div class="cake-area" id="cakeArea" aria-hidden="false" title="Click or blow to extinguish">
+        <div class="candle-wrap" id="candleWrap">
+          <div class="flame" id="flame" aria-hidden="false"></div>
+          <div class="candle-stick"></div>
+        </div>
+      </div>
+
+      <div class="smoke" id="smoke" aria-hidden="true"></div>
+
+      <canvas id="confetti"></canvas>
+    </div>
+
+    <div class="controls">
+      <button class="primary" id="playPause">Play</button>
+      <button class="secondary" id="enableMic">Enable Mic (optional)</button>
+      <div class="muted">Tip: Click the cake or blow into mic to extinguish candle</div>
+    </div>
+  </div>
+
+  <script>
+  /*********************
+   * Configuration
+   *********************/
+  const START_PROMPT_AT = 25; // seconds: when cake is shown & prompt should appear (tweak for your video)
+  const END_PROMPT_AT = 40;   // seconds: when prompt disappears (optional)
+  const BLOW_THRESHOLD = 0.12; // audio RMS threshold to detect a blow (tweak if too sensitive)
+  const BLOW_WINDOW_MS = 700; // how long RMS must exceed threshold to count as blow
+
+  /*********************
+   * DOM
+   *********************/
+  const video = document.getElementById('scene');
+  const playPause = document.getElementById('playPause');
+  const enableMicBtn = document.getElementById('enableMic');
+  const prompt = document.getElementById('prompt');
+  const flame = document.getElementById('flame');
+  const cakeArea = document.getElementById('cakeArea');
+  const confettiCanvas = document.getElementById('confetti');
+  const smokeEl = document.getElementById('smoke');
+
+  let micStream = null, analyser=null, audioCtx=null, dataArray=null, blowTimer=null, blowDetected=false;
+
+  /*********************
+   * Play/Pause
+   *********************/
+  playPause.addEventListener('click', ()=> {
+    if (video.paused) { video.play(); playPause.textContent='Pause' } 
+    else { video.pause(); playPause.textContent='Play' }
+  });
+
+  video.addEventListener('ended', ()=> playPause.textContent='Play');
+
+  /*********************
+   * Time update: show prompt & enable interactions
+   *********************/
+  video.addEventListener('timeupdate', ()=>{
+    const t = video.currentTime;
+    if (t >= START_PROMPT_AT && t <= END_PROMPT_AT && !blowDetected) {
+      showPrompt();
+    } else {
+      hidePrompt();
+    }
+  });
+
+  function showPrompt(){
+    prompt.style.display='block';
+    flame.style.opacity = 1;
+    cakeArea.style.pointerEvents='auto';
+  }
+  function hidePrompt(){
+    prompt.style.display='none';
+    // do not hide flame here (we only hide flame on blow)
+  }
+
+  /*********************
+   * Click / Tap to blow
+   *********************/
+  cakeArea.addEventListener('click', attemptBlow);
+
+  function attemptBlow(){
+    // only accept input during prompt window
+    const t = video.currentTime;
+    if (t < START_PROMPT_AT - 0.5 || t > END_PROMPT_AT + 1) return;
+    extinguishCandle('click');
+  }
+
+  /*********************
+   * Microphone Blow Detection (simple RMS-based)
+   *********************/
+  enableMicBtn.addEventListener('click', async ()=>{
+    if (micStream) { stopMic(); enableMicBtn.textContent='Enable Mic (optional)'; return; }
+    try {
+      micStream = await navigator.mediaDevices.getUserMedia({ audio:true });
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      const source = audioCtx.createMediaStreamSource(micStream);
+      analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 2048;
+      source.connect(analyser);
+      dataArray = new Uint8Array(analyser.fftSize);
+      enableMicBtn.textContent='Disable Mic';
+      runAudioLoop();
+    } catch (err){
+      alert('Could not access microphone. Please allow microphone access or use click/tap to blow.');
+      console.error(err);
+    }
+  });
+
+  function stopMic(){
+    if (micStream) {
+      micStream.getTracks().forEach(t=>t.stop());
+      micStream=null;
+    }
+    if (audioCtx) { audioCtx.close(); audioCtx=null; }
+    analyser=null; dataArray=null;
+  }
+
+  function runAudioLoop(){
+    if (!analyser) return;
+    analyser.getByteTimeDomainData(dataArray);
+    // compute normalized RMS
+    let sum=0;
+    for (let i=0;i<dataArray.length;i++){
+      const val = (dataArray[i] - 128)/128;
+      sum += val*val;
+    }
+    const rms = Math.sqrt(sum / dataArray.length);
+    // console.log('RMS', rms);
+    // require sustained loudness for BLOW_WINDOW_MS
+    if (rms >= BLOW_THRESHOLD) {
+      if (!blowTimer) blowTimer = Date.now();
+      else if (Date.now() - blowTimer >= BLOW_WINDOW_MS) {
+        // only blow if in prompt window
+        const t = video.currentTime;
+        if (t >= START_PROMPT_AT && t <= END_PROMPT_AT && !blowDetected) extinguishCandle('mic');
+      }
+    } else {
+      blowTimer = null;
+    }
+    requestAnimationFrame(runAudioLoop);
+  }
+
+  /*********************
+   * Extinguish + celebration
+   *********************/
+  function extinguishCandle(source='user'){
+    if (blowDetected) return;
+    blowDetected = true;
+    // remove flame
+    flame.style.transition='opacity .4s, transform .6s';
+    flame.style.opacity = 0;
+    flame.style.transform = 'translateY(-6px) scale(.6)';
+    // smoke animation (simple)
+    showSmoke();
+    // confetti + applause
+    launchConfetti();
+    playApplause();
+    // small visual feedback
+    prompt.textContent = 'You did it!';
+    setTimeout(()=>prompt.style.display='none', 1800);
+  }
+
+  function showSmoke(){
+    smokeEl.style.opacity = 1;
+    smokeEl.innerHTML = ''; // we can draw a simple CSS smoke svg
+    smokeEl.innerHTML = `
+      <svg width="120" height="60" viewbox="0 0 120 60" xmlns="http://www.w3.org/2000/svg">
+        <g opacity="0.9" fill="none" stroke="#999" stroke-width="2" stroke-linecap="round">
+          <path d="M10 50 q20 -30 40 -20" stroke-opacity="0.5"/>
+          <path d="M40 45 q20 -18 36 -8" stroke-opacity="0.4"/>
+          <path d="M74 42 q12 -12 20 -4" stroke-opacity="0.3"/>
+        </g>
+      </svg>`;
+    // fade out after a bit
+    setTimeout(()=>{ smokeEl.style.transition='opacity 1.2s'; smokeEl.style.opacity=0 }, 900);
+  }
+
+  /*********************
+   * Confetti (simple particles)
+   *********************/
+  function launchConfetti(){
+    const canvas = confettiCanvas;
+    const ctx = canvas.getContext('2d');
+    // resize canvas
+    canvas.width = canvas.clientWidth;
+    canvas.height = canvas.clientHeight;
+    const W = canvas.width, H = canvas.height;
+    const pieces = [];
+    for (let i=0;i<120;i++){
+      pieces.push({
+        x: W/2 + (Math.random()-0.5)*120,
+        y: H/3 + (Math.random()-0.5)*30,
+        vx: (Math.random()-0.5)*6,
+        vy: Math.random()*5 + 2,
+        size: 6 + Math.random()*6,
+        color: ['#ff6b9a','#ffd166','#9ad0f5','#bde4a7','#ffb2d0'][Math.floor(Math.random()*5)],
+        rot: Math.random()*360,
+        rotSpeed: (Math.random()-0.5)*10
+      });
+    }
+    let ticks = 0;
+    const anim = ()=>{
+      ctx.clearRect(0,0,W,H);
+      ticks++;
+      for (let p of pieces){
+        p.x += p.vx;
+        p.y += p.vy;
+        p.vy += 0.06; // gravity
+        p.rot += p.rotSpeed;
+        ctx.save();
+        ctx.translate(p.x,p.y);
+        ctx.rotate(p.rot*Math.PI/180);
+        ctx.fillStyle = p.color;
+        ctx.fillRect(-p.size/2, -p.size/2, p.size, p.size*0.6);
+        ctx.restore();
+      }
+      if (ticks < 220) requestAnimationFrame(anim);
+      else ctx.clearRect(0,0,W,H);
+    };
+    anim();
+  }
+
+  function playApplause(){
+    const audio = new Audio();
+    // small embedded applause base64 would be heavy; instead use WebAudio simple cheer tone
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const o = ctx.createOscillator();
+    const g = ctx.createGain();
+    o.type = 'triangle';
+    o.frequency.value = 880;
+    g.gain.value = 0.0001;
+    o.connect(g); g.connect(ctx.destination);
+    o.start();
+    g.gain.exponentialRampToValueAtTime(0.08, ctx.currentTime + 0.02);
+    o.frequency.exponentialRampToValueAtTime(660, ctx.currentTime + 0.25);
+    g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.8);
+    setTimeout(()=>{ o.stop(); ctx.close(); }, 1000);
+  }
+
+  /*********************
+   * Accessibility: keyboard to blow
+   *********************/
+  window.addEventListener('keydown', (e)=>{
+    if (e.key === 'Enter' || e.key === ' ') attemptBlow();
+  });
+
+  /*********************
+   * Tweak: pause at prompt (optional)
+   *********************/
+  // If you want the video to pause automatically when prompt appears:
+  // video.addEventListener('timeupdate', ()=>{ if (video.currentTime >= START_PROMPT_AT && video.currentTime < START_PROMPT_AT+0.5) video.pause(); });
+
+  </script>
+</body>
+</html>
