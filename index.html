@@ -8,7 +8,7 @@
     :root{--bg:#f7f2f6;--accent:#ff6b9a}
     html,body{height:100%;margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,"Helvetica Neue",Arial;background:var(--bg);display:flex;align-items:center;justify-content:center}
     .stage{width:min(900px,96vw);max-width:1200px;background:white;border-radius:12px;box-shadow:0 10px 30px rgba(0,0,0,.12);overflow:hidden;position:relative}
-    video{display:block;width:100%;height:auto;background:black}
+    video.main{display:block;width:100%;height:auto;background:black}
     .overlay{position:absolute;left:0;right:0;top:0;bottom:0;pointer-events:none}
     /* Cake/candle UI */
     .cake-area{position:absolute;pointer-events:auto;cursor:pointer;display:flex;align-items:center;justify-content:center;left:50%;transform:translateX(-50%);
@@ -19,34 +19,29 @@
       box-shadow:0 0 10px rgba(255,140,0,.8);transform-origin:center bottom;animation:flicker 250ms infinite;
       transition:opacity .25s,transform .25s;
     }
-    @keyframes flicker{
-      0%{transform:translateY(0) scaleY(1)}
-      50%{transform:translateY(-1px) scaleY(.96)}
-      100%{transform:translateY(0) scaleY(1)}
-    }
+    @keyframes flicker{0%{transform:translateY(0) scaleY(1)}50%{transform:translateY(-1px) scaleY(.96)}100%{transform:translateY(0) scaleY(1)}}
     .candle-stick{width:4px;height:32px;background:#fff;border-radius:2px;box-shadow:inset 0 -3px 0 rgba(0,0,0,.06)}
-    .prompt{
-      position:absolute;top:6%;left:50%;transform:translateX(-50%);background:rgba(255,255,255,.92);padding:8px 14px;border-radius:999px;font-weight:600;color:#333;display:none;pointer-events:none;box-shadow:0 6px 18px rgba(0,0,0,.12)
-    }
+    .prompt{position:absolute;top:6%;left:50%;transform:translateX(-50%);background:rgba(255,255,255,.92);padding:8px 14px;border-radius:999px;font-weight:600;color:#333;display:none;pointer-events:none;box-shadow:0 6px 18px rgba(0,0,0,.12)}
     .smoke{position:absolute;left:50%;transform:translateX(-50%);bottom:40%;opacity:0;pointer-events:none}
     canvas#confetti{position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none}
     .controls{padding:12px 16px;background:linear-gradient(180deg,transparent,#fff);display:flex;gap:10px;align-items:center;position:relative;z-index:4}
     button.primary{background:var(--accent);border:none;color:white;padding:8px 12px;border-radius:8px;font-weight:700;cursor:pointer}
     button.secondary{background:transparent;border:1px solid rgba(0,0,0,.08);padding:8px 12px;border-radius:8px;cursor:pointer}
     .muted{opacity:.7;font-size:13px}
-    /* mobile tweaks */
-    @media (max-width:520px){
-      .cake-area{width:56%;height:24%;bottom:18%}
-      .prompt{font-size:14px}
-    }
+    @media (max-width:520px){.cake-area{width:56%;height:24%;bottom:18%}.prompt{font-size:14px}}
   </style>
 </head>
 <body>
   <div class="stage" role="application" aria-label="Interactive candle video">
-    <video id="scene" playsinline preload="auto" crossorigin="anonymous">
-      <!-- Make sure your file is named scene.mp4 and is in the same repo/folder -->
+    <!-- main video element (will be swapped to second video after blow) -->
+    <video id="mainVideo" class="main" playsinline preload="auto" crossorigin="anonymous">
       <source src="scene.mp4" type="video/mp4">
       Your browser doesn't support HTML5 video.
+    </video>
+
+    <!-- small hidden preloader for the second video (speeds startup) -->
+    <video id="preloadVideo" style="display:none" preload="auto" muted>
+      <source src="Govindamani senthil happy birthday comedy.mp4" type="video/mp4">
     </video>
 
     <div class="overlay" id="overlay">
@@ -70,253 +65,200 @@
     </div>
   </div>
 
-  <script>
-  /*********************
-   * Configuration
-   *********************/
-  const START_PROMPT_AT = 4.5; // <-- show prompt and pause here
-  const END_PROMPT_AT = 999;   // not used now because we pause the video
-  const BLOW_THRESHOLD = 0.12; // mic RMS threshold
-  const BLOW_WINDOW_MS = 700;  // how long RMS must sustain
-  const STOP_BEFORE_END = 1.0; // stop playback this many seconds before video end
+<script>
+/* ---------- CONFIG ---------- */
+const START_PROMPT_AT = 4.5; // seconds where we pause and show candle UI
+const BLOW_THRESHOLD = 0.12;
+const BLOW_WINDOW_MS = 700;
+const STOP_BEFORE_END = 1.0; // when resuming first video, stop this many seconds before its end
+const SECOND_VIDEO = "Govindamani senthil happy birthday comedy.mp4"; // change if you renamed the file
 
-  /*********************
-   * DOM
-   *********************/
-  const video = document.getElementById('scene');
-  const playPause = document.getElementById('playPause');
-  const enableMicBtn = document.getElementById('enableMic');
-  const prompt = document.getElementById('prompt');
-  const flame = document.getElementById('flame');
-  const cakeArea = document.getElementById('cakeArea');
-  const confettiCanvas = document.getElementById('confetti');
-  const smokeEl = document.getElementById('smoke');
+/* ---------- DOM ---------- */
+const mainVideo = document.getElementById('mainVideo');
+const preloadVideo = document.getElementById('preloadVideo');
+const playPause = document.getElementById('playPause');
+const enableMicBtn = document.getElementById('enableMic');
+const prompt = document.getElementById('prompt');
+const flame = document.getElementById('flame');
+const cakeArea = document.getElementById('cakeArea');
+const confettiCanvas = document.getElementById('confetti');
+const smokeEl = document.getElementById('smoke');
 
-  /*********************
-   * State
-   *********************/
-  let micStream = null, analyser=null, audioCtx=null, dataArray=null;
-  let blowTimer = null, blowDetected=false, promptShown=false;
-  let stopAt = null; // video.duration - STOP_BEFORE_END
+/* ---------- STATE ---------- */
+let micStream=null, analyser=null, audioCtx=null, dataArray=null;
+let blowTimer=null, blowDetected=false, promptShown=false;
+let stopAt=null; // time to auto-pause near end
 
-  /*********************
-   * Play/Pause
-   *********************/
-  playPause.addEventListener('click', ()=> {
-    if (video.paused) { video.play(); playPause.textContent='Pause' } 
-    else { video.pause(); playPause.textContent='Play' }
-  });
-  video.addEventListener('ended', ()=> playPause.textContent='Play');
+/* ---------- Play/Pause ---------- */
+playPause.addEventListener('click', ()=> {
+  if (mainVideo.paused) { mainVideo.play(); playPause.textContent='Pause' }
+  else { mainVideo.pause(); playPause.textContent='Play' }
+});
+mainVideo.addEventListener('ended', ()=> playPause.textContent='Play');
 
-  /*********************
-   * Time update: pause at START_PROMPT_AT (exact) and show prompt
-   *********************/
-  video.addEventListener('timeupdate', ()=>{
-    const t = video.currentTime;
-
-    // Once we reach the start cue, pause the video and show prompt (only once)
-    if (!promptShown && t >= START_PROMPT_AT) {
-      promptShown = true;
-      // compute stopAt if possible
-      if (video.duration && !isNaN(video.duration)) {
-        stopAt = Math.max(0, video.duration - STOP_BEFORE_END);
-      }
-      // pause to hold frame for user interaction
-      video.pause();
-      playPause.textContent='Play';
-      showPrompt();
-      return;
+/* ---------- Timeupdate: pause at cue ---------- */
+mainVideo.addEventListener('timeupdate', ()=>{
+  const t = mainVideo.currentTime;
+  if (!promptShown && t >= START_PROMPT_AT) {
+    promptShown = true;
+    // compute stopAt for the *first* video (in case we resume it)
+    if (mainVideo.duration && !isNaN(mainVideo.duration)) {
+      stopAt = Math.max(0, mainVideo.duration - STOP_BEFORE_END);
     }
-
-    // After blow detected and playback resumed, auto-pause near end
-    if (blowDetected && stopAt !== null && video.currentTime >= stopAt) {
-      video.pause();
-      playPause.textContent='Play';
-    }
-  });
-
-  function showPrompt(){
-    prompt.style.display='block';
-    flame.style.opacity = 1;
-    cakeArea.style.pointerEvents='auto';
+    // pause to let user interact
+    mainVideo.pause();
+    playPause.textContent='Play';
+    showPrompt();
+    return;
   }
-  function hidePrompt(){
-    prompt.style.display='none';
+  // if first video resumed after blow and we want to pause before end
+  if (blowDetected && stopAt !== null && mainVideo.currentTime >= stopAt) {
+    mainVideo.pause();
+    playPause.textContent='Play';
   }
+});
 
-  /*********************
-   * Click / Tap to blow
-   *********************/
-  cakeArea.addEventListener('click', ()=> {
-    if (!promptShown || blowDetected) return;
-    extinguishCandle('click');
-  });
+function showPrompt(){
+  prompt.style.display='block';
+  flame.style.opacity = 1;
+  cakeArea.style.pointerEvents='auto';
+}
+function hidePrompt(){
+  prompt.style.display='none';
+}
 
-  /*********************
-   * Mic detection
-   *********************/
-  enableMicBtn.addEventListener('click', async ()=>{
-    if (micStream) { stopMic(); enableMicBtn.textContent='Enable Mic (optional)'; return; }
-    try {
-      micStream = await navigator.mediaDevices.getUserMedia({ audio:true });
-      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-      const source = audioCtx.createMediaStreamSource(micStream);
-      analyser = audioCtx.createAnalyser();
-      analyser.fftSize = 2048;
-      source.connect(analyser);
-      dataArray = new Uint8Array(analyser.fftSize);
-      enableMicBtn.textContent='Disable Mic';
-      runAudioLoop();
-    } catch (err){
-      alert('Could not access microphone. Please allow microphone access or use click/tap to blow.');
-      console.error(err);
-    }
-  });
+/* ---------- Click to blow ---------- */
+cakeArea.addEventListener('click', ()=> {
+  if (!promptShown || blowDetected) return;
+  extinguishCandle('click');
+});
 
-  function stopMic(){
-    if (micStream) {
-      micStream.getTracks().forEach(t=>t.stop());
-      micStream=null;
-    }
-    if (audioCtx) { audioCtx.close(); audioCtx=null; }
-    analyser=null; dataArray=null; blowTimer=null;
+/* ---------- Microphone ---------- */
+enableMicBtn.addEventListener('click', async ()=>{
+  if (micStream) { stopMic(); enableMicBtn.textContent='Enable Mic (optional)'; return; }
+  try {
+    micStream = await navigator.mediaDevices.getUserMedia({ audio:true });
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const src = audioCtx.createMediaStreamSource(micStream);
+    analyser = audioCtx.createAnalyser(); analyser.fftSize = 2048;
+    src.connect(analyser);
+    dataArray = new Uint8Array(analyser.fftSize);
+    enableMicBtn.textContent='Disable Mic';
+    runAudioLoop();
+  } catch (err) {
+    alert('Could not access microphone. Allow mic or click to blow.');
+    console.error(err);
   }
+});
 
-  function runAudioLoop(){
-    if (!analyser) return;
-    analyser.getByteTimeDomainData(dataArray);
-    let sum=0;
-    for (let i=0;i<dataArray.length;i++){
-      const val = (dataArray[i] - 128)/128;
-      sum += val*val;
+function stopMic(){
+  if (micStream) micStream.getTracks().forEach(t=>t.stop());
+  micStream=null;
+  if (audioCtx) audioCtx.close();
+  audioCtx=null; analyser=null; dataArray=null; blowTimer=null;
+}
+
+function runAudioLoop(){
+  if (!analyser) return;
+  analyser.getByteTimeDomainData(dataArray);
+  let sum=0;
+  for (let i=0;i<dataArray.length;i++){ const v=(dataArray[i]-128)/128; sum += v*v; }
+  const rms = Math.sqrt(sum / dataArray.length);
+  if (!promptShown || blowDetected) { if (analyser) requestAnimationFrame(runAudioLoop); return; }
+  if (rms >= BLOW_THRESHOLD) {
+    if (!blowTimer) blowTimer = Date.now();
+    else if (Date.now() - blowTimer >= BLOW_WINDOW_MS) {
+      const t = mainVideo.currentTime;
+      if (t >= START_PROMPT_AT - 0.6 && t <= START_PROMPT_AT + 5) extinguishCandle('mic');
     }
-    const rms = Math.sqrt(sum / dataArray.length);
+  } else blowTimer = null;
+  if (analyser) requestAnimationFrame(runAudioLoop);
+}
 
-    // Only consider mic blows when prompt is shown and not already blown
-    if (!promptShown || blowDetected) {
-      if (analyser) requestAnimationFrame(runAudioLoop);
-      return;
-    }
+/* ---------- Extinguish + celebration + switch to second video ---------- */
+function extinguishCandle(source='user'){
+  if (blowDetected) return;
+  blowDetected = true;
+  // stop mic to avoid double trigger
+  stopMic(); enableMicBtn.textContent='Enable Mic (optional)';
 
-    if (rms >= BLOW_THRESHOLD) {
-      if (!blowTimer) blowTimer = Date.now();
-      else if (Date.now() - blowTimer >= BLOW_WINDOW_MS) {
-        // final guard: ensure currentTime still around prompt time
-        const t = video.currentTime;
-        if (t >= START_PROMPT_AT - 0.5 && t <= (stopAt || START_PROMPT_AT + 5)) {
-          extinguishCandle('mic');
-        }
-      }
-    } else {
-      blowTimer = null;
-    }
-    if (analyser) requestAnimationFrame(runAudioLoop);
-  }
+  // visual
+  flame.style.transition='opacity .4s, transform .6s';
+  flame.style.opacity = 0;
+  flame.style.transform = 'translateY(-6px) scale(.6)';
+  showSmoke();
+  launchConfetti();
+  playApplause();
 
-  /*********************
-   * Extinguish + celebration
-   *********************/
-  function extinguishCandle(source='user'){
-    if (blowDetected) return;
-    blowDetected = true;
-    // stop mic to avoid double fire
-    stopMic();
-    enableMicBtn.textContent='Enable Mic (optional)';
+  prompt.textContent = 'You did it!';
+  setTimeout(()=> hidePrompt(), 1400);
+  cakeArea.style.pointerEvents='none';
 
-    // visual
-    flame.style.transition='opacity .4s, transform .6s';
-    flame.style.opacity = 0;
-    flame.style.transform = 'translateY(-6px) scale(.6)';
-    showSmoke();
-    launchConfetti();
-    playApplause();
-
-    prompt.textContent = 'You did it!';
-    setTimeout(()=>hidePrompt(), 1400);
+  // resume the first video briefly so the user sees continuation (if needed)
+  // but we will switch to the second video after a short delay so celebration runs
+  setTimeout(()=> {
+    // swap to second video (use preloaded src)
+    // It's safe to call play() since user interacted
+    mainVideo.pause();
+    // Replace sources: easiest way is to set src directly and call load()
+    mainVideo.src = SECOND_VIDEO;
+    mainVideo.load();
+    mainVideo.play().catch(err => { console.warn('Autoplay blocked', err); playPause.textContent='Play'; });
+    // optional: hide candle UI permanently
+    hidePrompt();
     cakeArea.style.pointerEvents='none';
+  }, 900); // wait 900ms so confetti/smoke/audience can show
+}
 
-    // compute stopAt if not already
-    if (!stopAt && video.duration && !isNaN(video.duration)) {
-      stopAt = Math.max(0, video.duration - STOP_BEFORE_END);
-    }
+/* ---------- Smoke / Confetti / Sound functions ---------- */
+function showSmoke(){
+  smokeEl.style.opacity = 1;
+  smokeEl.innerHTML = `
+    <svg width="120" height="60" viewbox="0 0 120 60" xmlns="http://www.w3.org/2000/svg">
+      <g opacity="0.9" fill="none" stroke="#999" stroke-width="2" stroke-linecap="round">
+        <path d="M10 50 q20 -30 40 -20" stroke-opacity="0.5"/>
+        <path d="M40 45 q20 -18 36 -8" stroke-opacity="0.4"/>
+        <path d="M74 42 q12 -12 20 -4" stroke-opacity="0.3"/>
+      </g>
+    </svg>`;
+  setTimeout(()=>{ smokeEl.style.transition='opacity 1.2s'; smokeEl.style.opacity=0 }, 900);
+}
 
-    // resume playback (unless we're already at or beyond stopAt)
-    setTimeout(()=> {
-      if (stopAt !== null && video.currentTime >= stopAt) return;
-      video.play().catch(()=>{});
-    }, 250);
+function launchConfetti(){
+  const canvas = confettiCanvas;
+  const ctx = canvas.getContext('2d');
+  canvas.width = canvas.clientWidth; canvas.height = canvas.clientHeight;
+  const W = canvas.width, H = canvas.height; const pieces = [];
+  for (let i=0;i<120;i++){
+    pieces.push({ x: W/2 + (Math.random()-0.5)*120, y: H/3 + (Math.random()-0.5)*30, vx:(Math.random()-0.5)*6, vy:Math.random()*5+2, size:6+Math.random()*6, color:['#ff6b9a','#ffd166','#9ad0f5','#bde4a7','#ffb2d0'][Math.floor(Math.random()*5)], rot:Math.random()*360, rotSpeed:(Math.random()-0.5)*10 });
   }
+  let ticks=0;
+  const anim = ()=>{
+    ctx.clearRect(0,0,W,H); ticks++;
+    for (let p of pieces){ p.x+=p.vx; p.y+=p.vy; p.vy+=0.06; p.rot+=p.rotSpeed; ctx.save(); ctx.translate(p.x,p.y); ctx.rotate(p.rot*Math.PI/180); ctx.fillStyle=p.color; ctx.fillRect(-p.size/2,-p.size/2,p.size,p.size*0.6); ctx.restore(); }
+    if (ticks < 220) requestAnimationFrame(anim); else ctx.clearRect(0,0,W,H);
+  };
+  anim();
+}
 
-  function showSmoke(){
-    smokeEl.style.opacity = 1;
-    smokeEl.innerHTML = `
-      <svg width="120" height="60" viewbox="0 0 120 60" xmlns="http://www.w3.org/2000/svg">
-        <g opacity="0.9" fill="none" stroke="#999" stroke-width="2" stroke-linecap="round">
-          <path d="M10 50 q20 -30 40 -20" stroke-opacity="0.5"/>
-          <path d="M40 45 q20 -18 36 -8" stroke-opacity="0.4"/>
-          <path d="M74 42 q12 -12 20 -4" stroke-opacity="0.3"/>
-        </g>
-      </svg>`;
-    setTimeout(()=>{ smokeEl.style.transition='opacity 1.2s'; smokeEl.style.opacity=0 }, 900);
-  }
+function playApplause(){
+  const ctx = new (window.AudioContext || window.webkitAudioContext)();
+  const o = ctx.createOscillator(); const g = ctx.createGain();
+  o.type='triangle'; o.frequency.value=880; g.gain.value=0.0001; o.connect(g); g.connect(ctx.destination);
+  o.start(); g.gain.exponentialRampToValueAtTime(0.08, ctx.currentTime + 0.02); o.frequency.exponentialRampToValueAtTime(660, ctx.currentTime + 0.25); g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.8);
+  setTimeout(()=>{ o.stop(); ctx.close(); }, 1000);
+}
 
-  /*********************
-   * Confetti + sound (same simple implementations)
-   *********************/
-  function launchConfetti(){
-    const canvas = confettiCanvas;
-    const ctx = canvas.getContext('2d');
-    canvas.width = canvas.clientWidth;
-    canvas.height = canvas.clientHeight;
-    const W = canvas.width, H = canvas.height;
-    const pieces = [];
-    for (let i=0;i<120;i++){
-      pieces.push({
-        x: W/2 + (Math.random()-0.5)*120,
-        y: H/3 + (Math.random()-0.5)*30,
-        vx: (Math.random()-0.5)*6,
-        vy: Math.random()*5 + 2,
-        size: 6 + Math.random()*6,
-        color: ['#ff6b9a','#ffd166','#9ad0f5','#bde4a7','#ffb2d0'][Math.floor(Math.random()*5)],
-        rot: Math.random()*360,
-        rotSpeed: (Math.random()-0.5)*10
-      });
-    }
-    let ticks = 0;
-    const anim = ()=>{
-      ctx.clearRect(0,0,W,H);
-      ticks++;
-      for (let p of pieces){
-        p.x += p.vx; p.y += p.vy; p.vy += 0.06; p.rot += p.rotSpeed;
-        ctx.save(); ctx.translate(p.x,p.y); ctx.rotate(p.rot*Math.PI/180);
-        ctx.fillStyle = p.color; ctx.fillRect(-p.size/2, -p.size/2, p.size, p.size*0.6); ctx.restore();
-      }
-      if (ticks < 220) requestAnimationFrame(anim); else ctx.clearRect(0,0,W,H);
-    };
-    anim();
-  }
+/* ---------- keyboard accessibility ---------- */
+window.addEventListener('keydown', (e)=> {
+  if ((e.key === 'Enter' || e.key === ' ') && promptShown && !blowDetected) extinguishCandle('key');
+});
 
-  function playApplause(){
-    const ctx = new (window.AudioContext || window.webkitAudioContext)();
-    const o = ctx.createOscillator(); const g = ctx.createGain();
-    o.type = 'triangle'; o.frequency.value = 880; g.gain.value = 0.0001; o.connect(g); g.connect(ctx.destination);
-    o.start(); g.gain.exponentialRampToValueAtTime(0.08, ctx.currentTime + 0.02);
-    o.frequency.exponentialRampToValueAtTime(660, ctx.currentTime + 0.25);
-    g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.8);
-    setTimeout(()=>{ o.stop(); ctx.close(); }, 1000);
-  }
+/* ---------- cleanup ---------- */
+window.addEventListener('beforeunload', ()=> { stopMic(); });
 
-  /*********************
-   * Keyboard accessibility
-   *********************/
-  window.addEventListener('keydown', (e)=>{
-    if ((e.key === 'Enter' || e.key === ' ') && promptShown && !blowDetected) extinguishCandle('key');
-  });
-
-  /*********************
-   * Cleanup
-   *********************/
-  window.addEventListener('beforeunload', ()=> { stopMic(); });
-  </script>
+/* ---------- start preloading the second video (non-blocking) ---------- */
+try { preloadVideo.load(); } catch(e){ /* ignore */ }
+</script>
 </body>
 </html>
