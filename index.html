@@ -87,7 +87,8 @@ const smokeEl = document.getElementById('smoke');
 /* ---------- STATE ---------- */
 let micStream=null, analyser=null, audioCtx=null, dataArray=null;
 let blowTimer=null, blowDetected=false, promptShown=false;
-let stopAt=null; // time to auto-pause near end
+let stopAt=null; // time to auto-pause near end (first video)
+let isFirstVideo = true; // <<-- track which clip is playing
 
 /* ---------- Play/Pause ---------- */
 playPause.addEventListener('click', ()=> {
@@ -99,7 +100,8 @@ mainVideo.addEventListener('ended', ()=> playPause.textContent='Play');
 /* ---------- Timeupdate: pause at cue ---------- */
 mainVideo.addEventListener('timeupdate', ()=>{
   const t = mainVideo.currentTime;
-  if (!promptShown && t >= START_PROMPT_AT) {
+  // only show prompt for the first video
+  if (isFirstVideo && !promptShown && t >= START_PROMPT_AT) {
     promptShown = true;
     // compute stopAt for the *first* video (in case we resume it)
     if (mainVideo.duration && !isNaN(mainVideo.duration)) {
@@ -111,8 +113,8 @@ mainVideo.addEventListener('timeupdate', ()=>{
     showPrompt();
     return;
   }
-  // if first video resumed after blow and we want to pause before end
-  if (blowDetected && stopAt !== null && mainVideo.currentTime >= stopAt) {
+  // only auto-pause near end for the first video
+  if (isFirstVideo && blowDetected && stopAt !== null && mainVideo.currentTime >= stopAt) {
     mainVideo.pause();
     playPause.textContent='Play';
   }
@@ -194,16 +196,18 @@ function extinguishCandle(source='user'){
   setTimeout(()=> hidePrompt(), 1400);
   cakeArea.style.pointerEvents='none';
 
-  // resume the first video briefly so the user sees continuation (if needed)
-  // but we will switch to the second video after a short delay so celebration runs
+  // switch to the second video after a short delay (celebration first)
   setTimeout(()=> {
-    // swap to second video (use preloaded src)
-    // It's safe to call play() since user interacted
+    // mark that we're no longer playing the first video so auto-pause logic won't apply
+    isFirstVideo = false;
+    stopAt = null; // clear the first-video cutoff so second video won't be auto-paused
+
+    // swap to second video
     mainVideo.pause();
-    // Replace sources: easiest way is to set src directly and call load()
     mainVideo.src = SECOND_VIDEO;
     mainVideo.load();
     mainVideo.play().catch(err => { console.warn('Autoplay blocked', err); playPause.textContent='Play'; });
+
     // optional: hide candle UI permanently
     hidePrompt();
     cakeArea.style.pointerEvents='none';
